@@ -1,0 +1,8 @@
+[Telegram]
+Token = ISI_DENGAN_BOT_TOKEN_TELEGRAM_ANDA
+ChatID = ISI_DENGAN_CHAT_ID_TELEGRAM_ANDA
+
+[AI]
+Enabled = true
+GeminiKey = ISI_DENGAN_GOOGLE_GEMINI_API_KEY_ANDA
+Model = gemini-flash-latest

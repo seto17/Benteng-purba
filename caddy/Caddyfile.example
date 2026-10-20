@@ -1,0 +1,53 @@
+{
+    email admin@instansi-anda.go.id
+    servers {
+        trusted_proxies static 127.0.0.1
+    }
+}
+
+domain-instansi.id {
+    # --- LAPIS 1: BLOKIR FILE SENSITIF & BOT SCANNER ---
+    @blockEnv path_regexp /\.(env|cmd|py|sh|exe|bat|sql|bak)$
+    respond @blockEnv 403
+
+    @forbidden {
+        path /.git* /storage* /bootstrap/cache* /node_modules*
+    }
+    respond @forbidden 403
+
+    @blockphp {
+        not path /index.php*
+        path *.php
+    }
+    respond @blockphp 403
+
+    @bad_user_agent {
+        header_regexp User-Agent (?i)(curl|wget|python|sqlmap|nikto|nuclei|nmap|gobuster)
+    }
+    respond @bad_user_agent 403
+
+    @blockEmptyUserAgent {
+        not header User-Agent *
+    }
+    respond @blockEmptyUserAgent 403
+
+    # --- SECURITY HEADERS ---
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        X-XSS-Protection "1; mode=block"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        -X-Powered-By
+        -Server
+    }
+
+    # --- TERUSKAN KE LAPIS 2: WAF-GO (PORT 8080) ---
+    reverse_proxy 127.0.0.1:8080
+
+    # --- LOGGING JSON UNTUK LAPIS 3: BOTPANTAU PYTHON ---
+    log {
+        output file /var/log/caddy/access.log
+        format json
+    }
+}
