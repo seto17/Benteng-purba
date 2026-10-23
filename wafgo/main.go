@@ -59,6 +59,13 @@ func main() {
 }
 
 func getClientIP(r *http.Request) string {
+	// Prioritas 0: Baca Cf-Connecting-Ip jika melalui Cloudflare / Tunnel
+	if cfip := r.Header.Get("Cf-Connecting-Ip"); cfip != "" {
+		ip := strings.TrimSpace(cfip)
+		if ip != "" && ip != "127.0.0.1" && ip != "::1" {
+			return ip
+		}
+	}
 	// Prioritas 1: Baca X-Forwarded-For jika di balik Caddy
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		parts := strings.Split(xff, ",")
@@ -212,16 +219,6 @@ func hasAuthenticatedEmployeeSession(r *http.Request) bool {
 	return false
 }
 
-func hasAuthenticatedEmployeeSession(r *http.Request) bool {
-	for _, c := range r.Cookies() {
-		name := strings.ToLower(c.Name)
-		if (strings.Contains(name, "laravel_session") || strings.Contains(name, "xsrf-token")) && len(c.Value) > 10 {
-			return true
-		}
-	}
-	return false
-}
-
 func isMalicious(r *http.Request) (bool, string, string) {
 	// Pola Kritis & Sistem (Selalu diblokir di semua endpoint, baik URL maupun Form Body)
 	criticalPatterns := []string{
@@ -320,8 +317,8 @@ func maskSensitiveData(raw string) string {
 }
 
 func getTelegramConfig() (string, string) {
-	token := "YOUR_TELEGRAM_BOT_TOKEN"
-	chatID := "YOUR_TELEGRAM_CHAT_ID"
+	token := "YOUR_TELEGRAM_BOT_TOKEN_HERE"
+	chatID := "YOUR_CHAT_ID_HERE"
 
 	configPaths := []string{
 		"/home/cula/kirimbot/config.ini",

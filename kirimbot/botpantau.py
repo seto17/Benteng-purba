@@ -28,7 +28,7 @@ AUTO_BLOCK_STRIKE_LIMIT = 3  # Batas Strike untuk Pola KRITIS atau IP Luar Neger
 STRIKE_LIMIT_CRITICAL = 3    # Level 1 (KRITIS): 3x langsung Auto-Block (Semua IP)
 STRIKE_LIMIT_FOREIGN = 3     # IP Luar Negeri (Non-ID): 3x langsung Auto-Block (Semua Level)
 STRIKE_LIMIT_ID_MEDIUM = 10  # IP Indonesia + Level 2 (SQLi/XSS Teks): Toleransi 10x (Cegah False Positive Pegawai)
-OWNER_ID = 0  # Set via config.ini ChatID
+OWNER_ID = 0  # Diisi otomatis dari config.ini
 AUTO_BLOCK_ENABLED = True
 AUTO_BLOCK_ENABLED_ID = True
 
@@ -92,7 +92,7 @@ if os.path.exists(CONFIG_FILE):
         pass
 
     AI_ENABLED = config.getboolean('AI', 'Enabled', fallback=True)
-    GEMINI_KEY = config.get('AI', 'GeminiKey', fallback='YOUR_GEMINI_API_KEY')
+    GEMINI_KEY = config.get('AI', 'GeminiKey', fallback='YOUR_GEMINI_API_KEY_HERE')
     AI_MODEL = config.get('AI', 'Model', fallback='gemini-3.8-flash')
     logger.info(f"Konfigurasi AI dimuat: Enabled={AI_ENABLED}, Model={AI_MODEL}")
 else:
@@ -116,6 +116,7 @@ def send_telegram(message):
 
 def add_to_blacklist(ip):
     """Add IP to blacklist file and in-memory set."""
+    ip = ip.strip()
     if ip not in SUSPICIOUS_IPS:
         try:
             with open(BLACKLIST_FILE, 'a') as f:
@@ -124,6 +125,20 @@ def add_to_blacklist(ip):
             logger.info(f"IP added to blacklist: {ip}")
         except IOError as e:
             logger.error(f"Failed to write to blacklist file: {e}")
+
+def remove_from_blacklist(ip):
+    """Hapus IP dari in-memory set dan file blacklist.txt saat di-unblock."""
+    ip = ip.strip()
+    SUSPICIOUS_IPS.discard(ip)
+    if os.path.exists(BLACKLIST_FILE):
+        try:
+            with open(BLACKLIST_FILE, 'r') as f:
+                lines = [line.strip() for line in f if line.strip() and line.strip() != ip]
+            with open(BLACKLIST_FILE, 'w') as f:
+                for line in lines:
+                    f.write(line + '\n')
+        except IOError as e:
+            logger.error(f"Failed to update blacklist file on unblock: {e}")
 GEOIP_CACHE = {}
 
 def is_foreign_ip(ip):
@@ -155,10 +170,30 @@ def is_foreign_ip(ip):
     GEOIP_CACHE[ip] = (False, "ID")
     return False, "ID"
 
+def _run_iptables_raw(args_list):
+    """Jalankan binary iptables (langsung atau via sudo) dengan dukungan PATH lengkap."""
+    for bin_path in ('/usr/sbin/iptables', '/sbin/iptables', 'iptables'):
+        try:
+            res = subprocess.run([bin_path] + args_list, capture_output=True, text=True, timeout=5)
+            if res.returncode == 0:
+                return True, res.stdout.strip()
+            res_sudo = subprocess.run(['sudo', bin_path] + args_list, capture_output=True, text=True, timeout=5)
+            if res_sudo.returncode == 0:
+                return True, res_sudo.stdout.strip()
+        except FileNotFoundError:
+            continue
+        except Exception as e:
+            return False, str(e)
+    return False, "Perintah iptables gagal atau aturan belum ada"
+
 def execute_iptables_cmd(action, ip):
     """
     Eksekusi iptables dengan aman (action: '-I' untuk block, '-D' untuk unblock).
-    Mendukung fallback sudo jika script berjalan non-root.
+    Menggunakan Dual-Layer Kernel Drop:
+    1. Layer-3 Source IP Drop (-s <ip> -j DROP) untuk serangan langsung ke IP server.
+    2. Layer-7 Kernel DPI String Match (-p tcp -m string --string <ip> --algo bm -j DROP)
+       agar serangan yang datang lewat Cloudflare Proxy / Tunnel / VPN (Cf-Connecting-Ip /
+       X-Forwarded-For) tetap langsung di-DROP oleh kernel di Chain INPUT!
     """
     ip = ip.strip()
     if not ip or ip in ('127.0.0.1', '::1', '-'):
@@ -167,21 +202,52 @@ def execute_iptables_cmd(action, ip):
     if ':' in ip and not ip.startswith('['):
         ip = ip.split(':')[0].strip()
 
-    cmd = ['iptables', action, 'INPUT', '-s', ip, '-j', 'DROP']
-    try:
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
-        if res.returncode == 0:
-            return True, f"Berhasil {'memblokir' if action == '-I' else 'membuka blokir'} IP {ip}"
+    if action == '-I':
+        # 1. Pasang aturan Layer-3 Source IP (-s <ip>) di baris #1 Chain INPUT
+        #    agar tampilan `iptables -L INPUT -n -v --line-numbers` di PuTTY selalu rapi & bersih!
+        already_in_kernel, _ = _run_iptables_raw(['-C', 'INPUT', '-s', ip, '-j', 'DROP'])
+        if not already_in_kernel:
+            ok, err = _run_iptables_raw(['-I', 'INPUT', '1', '-s', ip, '-j', 'DROP'])
+            if not ok:
+                return False, err
 
-        sudo_cmd = ['sudo'] + cmd
-        res_sudo = subprocess.run(sudo_cmd, capture_output=True, text=True, timeout=5)
-        if res_sudo.returncode == 0:
-            return True, f"Berhasil {'memblokir' if action == '-I' else 'membuka blokir'} IP {ip} via sudo"
+        # 2. Pasang Layer-7 Kernel DPI (-m string) di Chain OUTPUT (menuju WAF 127.0.0.1 & Backend 192.168.14.2)
+        #    agar serangan yang masuk lewat VPN / Cloudflare Proxy (membawa X-Forwarded-For / Cf-Connecting-Ip)
+        #    langsung MATI TOTAL (muter-muter) tanpa mengotori tampilan tabel Chain INPUT!
+        dpi_out = ['OUTPUT', '-p', 'tcp', '-m', 'multiport', '--dports', '80,8000,8080,8086,8089,8090,8092,8094', '-m', 'string', '--string', ip, '--algo', 'bm', '-j', 'DROP']
+        already_out, _ = _run_iptables_raw(['-C'] + dpi_out)
+        if not already_out:
+            ok_out, _ = _run_iptables_raw(['-I', 'OUTPUT', '1', '-p', 'tcp', '-m', 'multiport', '--dports', '80,8000,8080,8086,8089,8090,8092,8094', '-m', 'string', '--string', ip, '--algo', 'bm', '-j', 'DROP'])
+            if not ok_out:
+                already_out2, _ = _run_iptables_raw(['-C', 'OUTPUT', '-d', '192.168.14.2', '-p', 'tcp', '-m', 'string', '--string', ip, '--algo', 'bm', '-j', 'DROP'])
+                if not already_out2:
+                    _run_iptables_raw(['-I', 'OUTPUT', '1', '-d', '192.168.14.2', '-p', 'tcp', '-m', 'string', '--string', ip, '--algo', 'bm', '-j', 'DROP'])
 
-        err_msg = res_sudo.stderr.strip() or res.stderr.strip() or "Iptables error"
-        return False, err_msg
-    except Exception as e:
-        return False, str(e)
+        # 3. Putuskan juga koneksi TCP Keep-Alive yang masih menggantung dari IP penyerang
+        try:
+            subprocess.run(['ss', '-K', 'dst', ip], capture_output=True, timeout=2)
+        except Exception:
+            pass
+        return True, f"Berhasil memblokir IP {ip} di iptables"
+
+    elif action == '-D':
+        # Hapus seluruh aturan DROP (baik di INPUT maupun OUTPUT) untuk IP ini
+        removed_count = 0
+        for _ in range(10):
+            ok1, _ = _run_iptables_raw(['-D', 'INPUT', '-s', ip, '-j', 'DROP'])
+            ok2, _ = _run_iptables_raw(['-D', 'INPUT', '-p', 'tcp', '-m', 'multiport', '--dports', '80,443,8080', '-m', 'string', '--string', ip, '--algo', 'bm', '-j', 'DROP'])
+            ok3, _ = _run_iptables_raw(['-D', 'INPUT', '-p', 'tcp', '-m', 'string', '--string', ip, '--algo', 'bm', '-j', 'DROP'])
+            ok4, _ = _run_iptables_raw(['-D', 'OUTPUT', '-p', 'tcp', '-m', 'multiport', '--dports', '80,8000,8080,8086,8089,8090,8092,8094', '-m', 'string', '--string', ip, '--algo', 'bm', '-j', 'DROP'])
+            ok5, _ = _run_iptables_raw(['-D', 'OUTPUT', '-d', '192.168.14.2', '-p', 'tcp', '-m', 'string', '--string', ip, '--algo', 'bm', '-j', 'DROP'])
+            if ok1 or ok2 or ok3 or ok4 or ok5:
+                removed_count += 1
+            else:
+                break
+        if removed_count > 0:
+            return True, f"Berhasil membuka blokir IP {ip} ({removed_count} aturan dihapus)"
+        return False, f"IP {ip} sudah tidak ada di daftar blokir iptables"
+
+    return False, f"Action tidak dikenal: {action}"
 
 def block_ip(ip):
     success, msg = execute_iptables_cmd('-I', ip)
@@ -381,7 +447,7 @@ THREAT_CACHE = {}
 def send_alert_with_button(ip, alert, show_ai=False, already_blocked=False):
     url = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage'
     if already_blocked:
-        buttons = [{'text': '✅ IP Diblokir Otomatis', 'callback_data': 'blocked_done'}]
+        buttons = [{'text': '✅ IP Diblokir Otomatis', 'callback_data': f'blocked_done:{ip}'}]
     else:
         buttons = [{'text': '🔒 Blokir IP Ini', 'callback_data': f'blockip:{ip}'}]
     if show_ai and AI_ENABLED:
@@ -409,7 +475,33 @@ def send_alert_with_button(ip, alert, show_ai=False, already_blocked=False):
             res_plain.raise_for_status()
             logger.info(f"Alert Telegram (Plain Text) sukses terkirim untuk IP {ip}")
         except Exception as e2:
-            logger.error(f"Gagal mengirim alert ke Telegram: {e2}")       
+            logger.error(f"Gagal mengirim alert ke Telegram: {e2}")
+
+def format_pattern_label(pattern, matched_str=""):
+    """Ubah regex panjang menjadi label ancaman ringkas & rapi agar Markdown Telegram tidak pernah rusak."""
+    snippet = re.sub(r'[`*_~\[\]\n\r]', '', (matched_str or '').strip())[:35]
+    p_low = pattern.lower()
+    if 'union' in p_low or 'select' in p_low:
+        base = "SQL Injection (CWE-89)"
+    elif '<script' in p_low or 'onerror' in p_low:
+        base = "XSS Payload (CWE-79)"
+    elif '\\.\\.[' in p_low or '%2e%2e' in p_low:
+        base = "Path Traversal (CWE-22)"
+    elif 'cmd=' in p_low or 'shell_exec' in p_low:
+        base = "Command Injection / RCE (CWE-78)"
+    elif '/etc/passwd' in p_low or 'boot\\.ini' in p_low:
+        base = "Local File Inclusion / LFI (CWE-98)"
+    elif 'https?://' in p_low:
+        base = "Remote File Inclusion / RFI"
+    elif '\\.env' in p_low or 'wp-config' in p_low:
+        base = "Sensitive File Probe (CWE-538)"
+    elif 'index\\.php' in p_low:
+        base = "Unauthorized PHP / Backdoor Probe"
+    elif '169\\.254' in p_low or 'jndi:' in p_low:
+        base = "SSRF / Log4Shell Exploit"
+    else:
+        base = "Suspicious Exploit Pattern"
+    return f"{base} [{snippet}]" if snippet else base       
 def monitor_caddy_log(log_path, domain_label, is_auto_block_fn):
     """Monitor Caddy JSON logs for suspicious activity."""
     logger.info(f"Starting log monitoring for {domain_label} ({log_path})...")
@@ -498,15 +590,17 @@ def monitor_caddy_log(log_path, domain_label, is_auto_block_fn):
                     decoded_body = unquote_plus(body) if body else ''
                     # Cek Level 1 (CRITICAL_PATTERNS) terlebih dahulu
                     for pattern in CRITICAL_PATTERNS:
-                        if (decoded_target and re.search(pattern, decoded_target, re.IGNORECASE)) or (decoded_body and re.search(pattern, decoded_body, re.IGNORECASE)):
-                            matched_pattern = pattern
+                        m = (re.search(pattern, decoded_target, re.IGNORECASE) if decoded_target else None) or (re.search(pattern, decoded_body, re.IGNORECASE) if decoded_body else None)
+                        if m:
+                            matched_pattern = format_pattern_label(pattern, m.group(0))
                             is_critical_hit = True
                             break
                     # Jika belum kena Level 1, cek Level 2 (MEDIUM_HIGH_PATTERNS: SQLi/XSS Kontekstual)
                     if not matched_pattern:
                         for pattern in MEDIUM_HIGH_PATTERNS:
-                            if (decoded_target and re.search(pattern, decoded_target, re.IGNORECASE)) or (decoded_body and re.search(pattern, decoded_body, re.IGNORECASE)):
-                                matched_pattern = pattern
+                            m = (re.search(pattern, decoded_target, re.IGNORECASE) if decoded_target else None) or (re.search(pattern, decoded_body, re.IGNORECASE) if decoded_body else None)
+                            if m:
+                                matched_pattern = format_pattern_label(pattern, m.group(0))
                                 is_critical_hit = False
                                 break
 
@@ -545,14 +639,18 @@ def monitor_caddy_log(log_path, domain_label, is_auto_block_fn):
                         'body': body or (f"User-Agent: {user_agent[:120]}" if user_agent else "")
                     }
 
-                    # Jika Auto-Block aktif DAN jumlah serangan sudah mencapai effective_limit (3x atau 10x)
+                    # Jika Auto-Block aktif DAN jumlah serangan sudah mencapai effective_limit (3x atau 10x):
+                    # SELALU panggil block_ip(ip) tanpa terhalang cache SUSPICIOUS_IPS agar aturan iptables
+                    # di kernel dipastikan benar-benar terpasang pada baris #1!
                     auto_blocked_now = False
                     if is_auto_block_fn() and strikes >= effective_limit:
-                        if ip not in SUSPICIOUS_IPS:
-                            add_to_blacklist(ip)
-                            block_ip(ip)
-                        auto_blocked_now = True
-                        status_line = f"🚨 *Status Auto-Block:* `AKTIF — Strike {strikes}/{effective_limit} (IP LANGSUNG DIBLOKIR IPTABLES!)`"
+                        ok_blk, msg_blk = block_ip(ip)
+                        add_to_blacklist(ip)
+                        if ok_blk:
+                            auto_blocked_now = True
+                            status_line = f"🚨 *Status Auto-Block:* `AKTIF — Strike {strikes}/{effective_limit} (IP LANGSUNG DIBLOKIR IPTABLES!)`"
+                        else:
+                            status_line = f"⚠️ *Status Auto-Block:* `Strike {strikes}/{effective_limit} (Gagal Auto-Block: {msg_blk} — Silakan Klik Tombol Blokir)`"
                     else:
                         mode_str = "ON" if is_auto_block_fn() else "OFF"
                         status_line = f"⚡ *Hitungan Serangan:* `Strike {strikes}/{effective_limit}` (Auto-Block: {mode_str})"
@@ -593,12 +691,20 @@ async def handle_block_button(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.answer(f"❌ Akses ditolak! ID Anda ({user_id}) bukan admin ({OWNER_ID}).", show_alert=True)
         return
 
-    if query.data == "blocked_done":
-        await query.answer("ℹ️ IP ini sudah diblokir sebelumnya.", show_alert=False)
-        return
-
     if not query.data:
         await query.answer()
+        return
+
+    if query.data.startswith("blocked_done"):
+        parts = query.data.split(":", 1)
+        if len(parts) == 2 and parts[1].strip():
+            chk_ip = parts[1].strip()
+            ok, _ = execute_iptables_cmd('-I', chk_ip)
+            if ok:
+                add_to_blacklist(chk_ip)
+                await query.answer(f"✅ Terverifikasi: IP {chk_ip} aktif diblokir di baris #1 iptables!", show_alert=True)
+                return
+        await query.answer("ℹ️ IP ini sudah diblokir di iptables.", show_alert=False)
         return
 
     old_text = query.message.text or ""
@@ -654,15 +760,15 @@ async def handle_block_button(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         if success:
             add_to_blacklist(ip)
-            updated_text = old_text + f"\n\n🔒 *Status:* IP `{ip}` BERHASIL DIBLOKIR oleh admin."
-            buttons = [InlineKeyboardButton("✅ IP Telah Diblokir", callback_data="blocked_done")]
+            updated_text = old_text + f"\n\n🔒 Status: IP {ip} BERHASIL DIBLOKIR oleh admin."
+            buttons = [InlineKeyboardButton("✅ IP Telah Diblokir", callback_data=f"blocked_done:{ip}")]
             if not has_ai_done and AI_ENABLED:
                 buttons.append(InlineKeyboardButton("🧠 Minta Analisis AI", callback_data=f"askai:{ip}"))
             new_keyboard = InlineKeyboardMarkup([buttons])
             try:
-                await query.edit_message_text(updated_text, parse_mode="Markdown", reply_markup=new_keyboard)
-            except Exception:
                 await query.edit_message_text(updated_text, reply_markup=new_keyboard)
+            except Exception:
+                pass
         else:
             await query.answer(f"⚠️ Gagal blokir: {msg}", show_alert=True)
             logger.error(f"Gagal blokir IP {ip}: {msg}")
@@ -721,10 +827,10 @@ async def handle_ai_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.answer("🧠 Mengontak Gemini AI SOC Threat Copilot...", show_alert=False)
 
-    is_blocked = "BERHASIL DIBLOKIR" in old_text or ip in SUSPICIOUS_IPS
+    is_blocked = ("BERHASIL DIBLOKIR" in old_text) or ("DIBLOKIR IPTABLES" in old_text) or (ip in SUSPICIOUS_IPS)
 
     # Update tampilan tombol menjadi loading
-    block_btn = InlineKeyboardButton("✅ IP Telah Diblokir", callback_data="blocked_done") if is_blocked else InlineKeyboardButton("🔒 Blokir IP Ini", callback_data=f"blockip:{ip}")
+    block_btn = InlineKeyboardButton("✅ IP Telah Diblokir", callback_data=f"blocked_done:{ip}") if is_blocked else InlineKeyboardButton("🔒 Blokir IP Ini", callback_data=f"blockip:{ip}")
     loading_kb = InlineKeyboardMarkup([[
         block_btn,
         InlineKeyboardButton("⏳ AI Sedang Menganalisis...", callback_data="ai_loading")
@@ -741,7 +847,7 @@ async def handle_ai_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if ai_text:
         updated_text = (
             f"{old_text}\n\n"
-            f"🧠 *--- ANALISIS INTELIJEN AI (GEMINI SOC) ---*\n"
+            f"🧠 --- ANALISIS INTELIJEN AI (GEMINI SOC) ---\n"
             f"{ai_text}"
         )
         done_kb = InlineKeyboardMarkup([[
@@ -774,12 +880,12 @@ async def unblock_ip_iptables(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     ip = context.args[0].strip()
     STRIKE_COUNTER.pop(ip, None)
-    SUSPICIOUS_IPS.discard(ip)
+    remove_from_blacklist(ip)
     success, msg = execute_iptables_cmd('-D', ip)
     if success:
-        await update.message.reply_text(f"✅ IP `{ip}` berhasil di-unblock dan hitungan Strike di-reset ke 0.", parse_mode="Markdown")
+        await update.message.reply_text(f"✅ IP `{ip}` berhasil di-unblock, dihapus dari blacklist, dan hitungan Strike di-reset ke 0.", parse_mode="Markdown")
     else:
-        await update.message.reply_text(f"⚠️ Gagal unblock IP `{ip}`: {msg} (Hitungan Strike sudah di-reset ke 0)")
+        await update.message.reply_text(f"⚠️ Info unblock IP `{ip}`: {msg} (Hitungan Strike & Blacklist sudah di-reset ke 0)")
 
 async def block_ip_iptables(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if OWNER_ID and update.effective_user.id != OWNER_ID:

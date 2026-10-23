@@ -30,8 +30,10 @@
    * Memantau log secara *real-time* 24/7 dan mendeteksi **10 kategori serangan** (termasuk serangan yang sudah diblokir `403` oleh Caddy di pintu depan) serta lonjakan trafik DDoS berbasis **Top IP Dominan** (dengan mengecualikan file statis `.css`/`.js`/`.png` agar bebas alarm palsu).
    * **Smart In-Memory Geo-IP dan ISP Cache:** Mengenali lokasi negara dan provider ISP penyerang dengan latensi 0ms untuk IP berulang.
    * **Adaptive Risk-Based Tiered Auto-Block (3x Kritis/Luar Negeri dan 10x Toleransi IP Indonesia):**
-     * **Level 1 Kritis (`.env`, `.git`, `/etc/passwd`, `/*.php` backdoor, RCE, Scanner) dan IP Luar Negeri:** Langsung diblokir otomatis di firewall kernel (`iptables -I INPUT -s <IP> -j DROP`) pada **Strike ke-3 (3/3)**.
+     * **Level 1 Kritis (`.env`, `.git`, `/etc/passwd`, `/*.php` backdoor, RCE, Scanner) dan IP Luar Negeri:** Langsung diblokir otomatis di firewall kernel pada **Strike ke-3 (3/3)**.
      * **Level 2 Teks SQLi/XSS dari IP Indonesia:** Diberikan toleransi hingga **10x (Strike 10/10)** untuk melindungi pegawai lokal dari blokir otomatis yang tidak disengaja (*Zero False Positive*).
+   * **Dual-Layer Kernel Drop (`Chain INPUT` Source IP + `Chain OUTPUT` Kernel DPI `xt_string`):**
+     * Memasang blokir ganda secara otomatis di kernel Linux: `iptables -I INPUT 1 -s <IP> -j DROP` (untuk memutus serangan langsung ke IP server) sekaligus `iptables -I OUTPUT 1 ... -m string --string <IP> --algo bm -j DROP` (inspeksi paket mendalam *Boyer-Moore* untuk memutus total serangan yang bersembunyi di balik **VPN, Cloudflare Proxy, atau Tunnel**).
    * **2 Tombol Interaktif di Telegram (Dilengkapi Pengaman Konfirmasi 2-Langkah):**
      * `[ 🧠 Minta Analisis AI ]` : Memanggil **Hybrid AI** (Google Gemini `gemini-flash-latest` dengan *fallback* otomatis ke *Local Edge Tactical AI Engine* anti-gagal) untuk menganalisis jenis serangan (CWE/MITRE), tingkat bahaya, taktik penyerang, dan saran mitigasi.
      * `[ 🔒 Blokir IP Ini ]` : Eksekusi `iptables DROP` langsung dari HP Admin yang dilengkapi **Pengaman Konfirmasi 2-Langkah (`[ ⚠️ Yakin Blokir? ]` / `[ ❌ Batal ]`)** agar tidak terpencet secara tidak sengaja.
