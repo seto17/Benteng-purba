@@ -4,18 +4,18 @@
 
 * **Kompetisi:** Kartika Cyber Hackathon 2026 (PUSSIBERAD TNI AD DAN CODEPOLITAN)
 * **Kategori:** **PENANGKALAN** (*Active Cyber Defense dan Deterrence*)
-* **Studi Kasus Implementasi Nyata:** Infrastruktur Digital dan Layanan Mesin Absensi di Lingkungan **Museum Manusia Purba Sangiran** (`sangiran.xyz` dan `sangiran.id`)
+* **Studi Kasus Implementasi Nyata:** Infrastruktur Digital dan Layanan Mesin Absensi di Lingkungan **Museum Manusia Purba Sangiran** (`sangiran.xyz`)
 
 ---
 
 ## 1. Ringkasan Solusi
-**BENTENG PURBA** adalah sistem pertahanan siber aktif 3 lapis (*Defense-in-Depth*) yang berjalan 100% mandiri di dalam server Linux (*on-premise*) tanpa bergantung pada layanan keamanan pihak ketiga. Sistem ini menggabungkan kecepatan penyaringan tingkat aplikasi (**Caddy** dan **WAF-Go**), kecerdasan analisis ancaman (**Hybrid Cloud Google Gemini AI + Local Edge Tactical AI**), serta eksekusi pemutusan akses peretas di level kernel Linux (**`iptables DROP`**) baik secara otomatis (**Smart 3-Strike Auto-Block**) maupun satu sentuhan tombol dari aplikasi **Telegram**.
+**BENTENG PURBA** adalah sistem pertahanan siber aktif 3 lapis (*Defense-in-Depth*) yang berjalan 100% mandiri di dalam server Linux (*on-premise*) tanpa bergantung pada layanan keamanan pihak ketiga. Sistem ini menggabungkan kecepatan penyaringan tingkat aplikasi (**Caddy** dan **WAF-Go**), kecerdasan analisis ancaman (**Hybrid Cloud Google Gemini AI + Local Edge Tactical AI**), serta eksekusi pemutusan akses peretas di level kernel Linux (**`iptables DROP`**) baik secara otomatis (**Adaptive 3x/10x Strike Auto-Block**) maupun satu sentuhan tombol dari aplikasi **Telegram**.
 
 ---
 
 ## 2. Arsitektur 3 Lapis Pertahanan
 
-![Diagram Arsitektur Benteng Purba](DIAGRAM_ALUR_BENTENG_PURBA.png)
+![Diagram Arsitektur Benteng Purba](DIAGRAM_ALUR_BENTENG_PURBA.png?v=2)
 
 1. **Lapis 1 — Caddy Web Server (`caddy/Caddyfile.example`):**
    * Mengamankan koneksi HTTPS (SSL/TLS otomatis) dan menyuntikkan *Security Headers* (HSTS, CSP, X-Frame-Options).
@@ -24,14 +24,17 @@
 2. **Lapis 2 — Custom WAF-Go (`wafgo/main.go`):**
    * *Reverse proxy* berkinerja tinggi berbasis bahasa Go (`:8080`) yang melakukan inspeksi mendalam (*Deep Packet Inspection*) pada parameter URL dan isi *POST Form Body*.
    * Menangkal serangan *SQL Injection (SQLi)*, *Cross-Site Scripting (XSS)*, *LFI/RFI*, *Path Traversal*, *SSRF*, dan *OS Command Injection (RCE)*.
+   * **Context-Aware Employee Daily Log Filter (`/pegawaic`):** Mengenali sesi login pegawai internal (`laravel_session`) sehingga staf IT dapat menulis laporan kerja harian (*Log Harian*) yang memuat istilah teknis SQL tanpa terblokir `403`, sembari tetap memblokir ketat injeksi di URL query string maupun serangan XSS, LFI, dan RCE.
    * **Sensor Password Otomatis (`password=******`):** Menyensor kredensial pada *log* dan notifikasi Telegram demi kepatuhan **UU PDP (UU No. 27 Tahun 2022)**.
 3. **Lapis 3 — Botpantau Python dan AI SOC Copilot (`kirimbot/botpantau.py`):**
-   * Memantau log secara *real-time* 24/7 dan mendeteksi **10 kategori serangan** (termasuk serangan yang sudah diblokir `403` oleh Caddy di pintu depan) serta lonjakan trafik DDoS.
+   * Memantau log secara *real-time* 24/7 dan mendeteksi **10 kategori serangan** (termasuk serangan yang sudah diblokir `403` oleh Caddy di pintu depan) serta lonjakan trafik DDoS berbasis **Top IP Dominan** (dengan mengecualikan file statis `.css`/`.js`/`.png` agar bebas alarm palsu).
    * **Smart In-Memory Geo-IP dan ISP Cache:** Mengenali lokasi negara dan provider ISP penyerang dengan latensi 0ms untuk IP berulang.
-   * **Smart 3-Strike Auto-Block (Zero False Positive):** Menghitung jumlah pelanggaran per IP. Pada *Strike 1/3* dan *2/3* sistem mengirim peringatan, dan pada **Strike 3/3** sistem **otomatis memblokir IP penyerang di firewall kernel (`iptables -I INPUT -s <IP> -j DROP`)**.
-   * **2 Tombol Interaktif di Telegram:**
+   * **Adaptive Risk-Based Tiered Auto-Block (3x Kritis/Luar Negeri dan 10x Toleransi IP Indonesia):**
+     * **Level 1 Kritis (`.env`, `.git`, `/etc/passwd`, `/*.php` backdoor, RCE, Scanner) dan IP Luar Negeri:** Langsung diblokir otomatis di firewall kernel (`iptables -I INPUT -s <IP> -j DROP`) pada **Strike ke-3 (3/3)**.
+     * **Level 2 Teks SQLi/XSS dari IP Indonesia:** Diberikan toleransi hingga **10x (Strike 10/10)** untuk melindungi pegawai lokal dari blokir otomatis yang tidak disengaja (*Zero False Positive*).
+   * **2 Tombol Interaktif di Telegram (Dilengkapi Pengaman Konfirmasi 2-Langkah):**
      * `[ 🧠 Minta Analisis AI ]` : Memanggil **Hybrid AI** (Google Gemini `gemini-flash-latest` dengan *fallback* otomatis ke *Local Edge Tactical AI Engine* anti-gagal) untuk menganalisis jenis serangan (CWE/MITRE), tingkat bahaya, taktik penyerang, dan saran mitigasi.
-     * `[ 🔒 Blokir IP Ini ]` : Eksekusi 1-klik `iptables DROP` langsung dari HP Admin.
+     * `[ 🔒 Blokir IP Ini ]` : Eksekusi `iptables DROP` langsung dari HP Admin yang dilengkapi **Pengaman Konfirmasi 2-Langkah (`[ ⚠️ Yakin Blokir? ]` / `[ ❌ Batal ]`)** agar tidak terpencet secara tidak sengaja.
 
 ---
 
@@ -113,8 +116,8 @@ Sesuai dengan ketentuan **Pasal 5.3 Syarat dan Ketentuan Kartika Cyber Hackathon
 | Komponen | Fondasi Sebelum Program (*Pre-Existing Work*) | Pengembangan dan Inovasi Baru Selama Program (*New Development*) |
 | :--- | :--- | :--- |
 | **1. Caddy Web Server** | Konfigurasi *reverse proxy* dasar untuk meneruskan trafik web dan aplikasi absensi. | Integrasi aturan penolakan pintu depan (`403`) agar terkoneksi dengan sensor deteksi 10 kategori serangan di Lapis 3. |
-| **2. WAF-Go (`main.go`)** | Penyaring kata kunci sederhana pada URL yang menampilkan halaman statis. | • **Sensor Password Otomatis (`password=******`)** patuh UU PDP.<br/>• Pengiriman *alert* langsung dari WAF-Go ke Telegram dengan **2 Tombol Interaktif (`Blokir IP` dan `Analisis AI`)**.<br/>• Penambahan aturan deteksi berkas rahasia (`.env`, `.git`, `.htaccess`). |
-| **3. Botpantau (`botpantau.py`)** | Skrip pemantau log dasar dengan pemblokiran IP luar negeri berbasis server lokal lama. | • **Hybrid AI Threat Copilot (`[ 🧠 Minta Analisis AI ]`)** menggabungkan Cloud Google Gemini AI + *Local Edge Tactical AI Engine* (100% anti-gagal saat API 503).<br/>• **Smart 3-Strike Auto-Block** (otomatis blokir `iptables DROP` pada serangan ke-3 untuk semua IP tanpa *false positive*).<br/>• **Deteksi 10 Kategori Serangan** termasuk *Scanner User-Agent* (`sqlmap`, `nikto`, `nuclei`) dan *backdoor* PHP.<br/>• **Smart In-Memory Geo-IP dan ISP Cache** (latensi 0ms) dan *Whitelist* aset statis (`multiple-select.js`). |
+| **2. WAF-Go (`main.go`)** | Penyaring kata kunci sederhana pada URL yang menampilkan halaman statis. | • **Context-Aware Employee Daily Log Filter (`/pegawaic`)** agar staf IT yang sudah login bebas menulis laporan kerja harian tanpa terkena *false positive* `403`.<br/>• **Sensor Password Otomatis (`password=******`)** patuh UU PDP.<br/>• Pengiriman *alert* langsung dari WAF-Go ke Telegram dengan **2 Tombol Interaktif (`Blokir IP` dan `Analisis AI`)**.<br/>• Penambahan aturan deteksi berkas rahasia (`.env`, `.git`, `.htaccess`). |
+| **3. Botpantau (`botpantau.py`)** | Skrip pemantau log dasar dengan pemblokiran IP luar negeri berbasis server lokal lama. | • **Hybrid AI Threat Copilot (`[ 🧠 Minta Analisis AI ]`)** menggabungkan Cloud Google Gemini AI + *Local Edge Tactical AI Engine* (100% anti-gagal saat API 503).<br/>• **Adaptive Risk-Based Tiered Auto-Block** (otomatis blokir `iptables DROP` pada *3x Strike* untuk pola kritis/IP luar negeri, dan toleransi *10x Strike* untuk IP Indonesia pada pola teks SQL/XSS).<br/>• **Pengaman Konfirmasi 2-Langkah (`[ ⚠️ Yakin Blokir? ]` / `[ ❌ Batal ]`)** pada tombol blokir manual Telegram.<br/>• **Deteksi 10 Kategori Serangan dan Smart DDoS Top-IP** (mengecualikan aset statis dan mengidentifikasi *Top IP Dominan* beserta persentase kontribusinya).<br/>• **Smart In-Memory Geo-IP dan ISP Cache** (latensi 0ms) dan *Whitelist* aset statis (`multiple-select.js`). |
 
 ---
 

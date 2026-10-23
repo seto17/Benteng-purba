@@ -31,14 +31,14 @@ type Backend struct {
 }
 
 var domainMap = map[string]Backend{
-	"sangiran.id":             {URL: "http://127.0.0.1:8090", Host: "sangiran.id"},
-	"sangiran.xyz":            {URL: "http://127.0.0.1:8000", Host: "sangiran.xyz"},
-	
+	"sangiran.id":             {URL: "http://192.168.22.2:8090", Host: "sangiran.id"},
+	"sangiran.xyz":            {URL: "http://192.168.14.2:8000", Host: "sangiran.xyz"},
+	"museumdancagarbudaya.id": {URL: "http://192.168.14.2:8000", Host: "museumdancagarbudaya.id"},
 }
 
 var ipWhitelist = map[string]bool{
 	"127.0.0.1":    true,
-	"127.0.0.1": true,
+	"192.168.17.1": true,
 }
 
 func serveWAFPage(w http.ResponseWriter, r *http.Request) {
@@ -202,29 +202,53 @@ func wafHandler(w http.ResponseWriter, r *http.Request) {
 	proxy.ServeHTTP(w, r)
 }
 
+func hasAuthenticatedEmployeeSession(r *http.Request) bool {
+	for _, c := range r.Cookies() {
+		name := strings.ToLower(c.Name)
+		if (strings.Contains(name, "laravel_session") || strings.Contains(name, "xsrf-token")) && len(c.Value) > 10 {
+			return true
+		}
+	}
+	return false
+}
+
+func hasAuthenticatedEmployeeSession(r *http.Request) bool {
+	for _, c := range r.Cookies() {
+		name := strings.ToLower(c.Name)
+		if (strings.Contains(name, "laravel_session") || strings.Contains(name, "xsrf-token")) && len(c.Value) > 10 {
+			return true
+		}
+	}
+	return false
+}
+
 func isMalicious(r *http.Request) (bool, string, string) {
-	patterns := []string{
-		// XSS
+	// Pola Kritis & Sistem (Selalu diblokir di semua endpoint, baik URL maupun Form Body)
+	criticalPatterns := []string{
+		// XSS & Script Injection
 		"<script", "javascript:", "onerror=", "onload=", "alert(", "<img", "document.cookie", "eval(", "setTimeout(",
 		"<iframe", "<svg", "<body", "<video", "<input", "srcdoc=",
 		"%3cscript", "%3ciframe", "%3csvg", "%3cimg",
-
-		// SQLi
-		"union select", "select .* from", "insert into", "update .* set", "delete from",
-		"drop table", "alter table", "exec(", "sleep(", "benchmark(",
 
 		// Directory Traversal & Sensitive Files
 		"/etc/passwd", "boot.ini", "/proc/", "/windows/", "win.ini",
 		"/.env", "/.git", "/wp-config.php", "/.htaccess",
 
-		// Command Injection (Aman dari false positive)
+		// Command Injection & RCE
 		"| sh", "| bash", "| nc", "| wget", "| curl", "| php", "| perl", "| python", "| ls", "| cat",
 
 		// SSRF
 		"127.0.0.1", "localhost", "::1", "169.254.169.254", "0.0.0.0", "metadata.google.internal",
 
-		// Misc
+		// System Functions & SQL Destructive/Time-Based Payloads
 		"base64_decode", "system(", "shell_exec", "passthru(", "phpinfo(", "load_file(", "outfile", "information_schema",
+		"sleep(", "benchmark(", "waitfor delay",
+	}
+
+	// Pola Kata Kunci SQL (Diblokir penuh di URL Query & Endpoint Publik, namun diizinkan pada teks Form Body Log Harian Pegawai Terautentikasi)
+	sqlTextPatterns := []string{
+		"union select", "select .* from", "insert into", "update .* set", "delete from",
+		"drop table", "alter table", "exec(",
 	}
 
 	// Simpan isi body asli untuk dikembalikan nanti
@@ -258,13 +282,34 @@ func isMalicious(r *http.Request) (bool, string, string) {
 		}
 	}
 
-	payload := strings.ToLower(r.URL.Path + query + form)
+	urlPayload := strings.ToLower(r.URL.Path + query)
+	fullPayload := strings.ToLower(r.URL.Path + query + form)
 
-	for _, pattern := range patterns {
-		if strings.Contains(payload, strings.ToLower(pattern)) {
+	// 1. Cek Pola Kritis (XSS, LFI, RCE, SSRF, Sensitive File, Time-based SQLi) pada SELURUH request (URL + Form Body)
+	for _, pattern := range criticalPatterns {
+		if strings.Contains(fullPayload, strings.ToLower(pattern)) {
 			return true, pattern, maskSensitiveData(rawBody)
 		}
 	}
+
+	// 2. Context-Aware Check untuk Kata Kunci SQL (union select, insert into, dll):
+	// Selalu blokir jika ada di URL/Query String, ATAU jika bukan form POST/PUT pegawai terautentikasi di route internal (/pegawaic)
+	isInternalEmployeeForm := (r.Method == http.MethodPost || r.Method == http.MethodPut) &&
+		strings.HasPrefix(strings.ToLower(r.URL.Path), "/pegawaic") &&
+		hasAuthenticatedEmployeeSession(r)
+
+	for _, pattern := range sqlTextPatterns {
+		patLower := strings.ToLower(pattern)
+		// Jika ada di URL path / query string -> tetap blokir mutlak!
+		if strings.Contains(urlPayload, patLower) {
+			return true, pattern, maskSensitiveData(rawBody)
+		}
+		// Jika bukan form internal pegawai terautentikasi -> blokir juga di form body!
+		if !isInternalEmployeeForm && strings.Contains(fullPayload, patLower) {
+			return true, pattern, maskSensitiveData(rawBody)
+		}
+	}
+
 	return false, "", ""
 }
 
@@ -275,8 +320,8 @@ func maskSensitiveData(raw string) string {
 }
 
 func getTelegramConfig() (string, string) {
-	token := "ISI_DENGAN_BOT_TOKEN_TELEGRAM_ANDA"
-	chatID := "ISI_DENGAN_CHAT_ID_ANDA"
+	token := "YOUR_TELEGRAM_BOT_TOKEN"
+	chatID := "YOUR_TELEGRAM_CHAT_ID"
 
 	configPaths := []string{
 		"/home/cula/kirimbot/config.ini",

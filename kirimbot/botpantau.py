@@ -4,7 +4,7 @@ import time
 import threading
 import subprocess
 import requests
-from collections import deque
+from collections import deque, Counter
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
@@ -24,13 +24,16 @@ CHECK_INTERVAL = 60  # Seconds
 REQUEST_THRESHOLD = 100  # Requests per CHECK_INTERVAL
 SUSPICIOUS_IPS = set()
 STRIKE_COUNTER = {}  # Menyimpan jumlah pelanggaran/serangan per IP
-AUTO_BLOCK_STRIKE_LIMIT = 3  # Minimal 3x serangan baru di-autoblock (Mencegah False Positive)
-OWNER_ID = 0
+AUTO_BLOCK_STRIKE_LIMIT = 3  # Batas Strike untuk Pola KRITIS atau IP Luar Negeri
+STRIKE_LIMIT_CRITICAL = 3    # Level 1 (KRITIS): 3x langsung Auto-Block (Semua IP)
+STRIKE_LIMIT_FOREIGN = 3     # IP Luar Negeri (Non-ID): 3x langsung Auto-Block (Semua Level)
+STRIKE_LIMIT_ID_MEDIUM = 10  # IP Indonesia + Level 2 (SQLi/XSS Teks): Toleransi 10x (Cegah False Positive Pegawai)
+OWNER_ID = 0  # Set via config.ini ChatID
 AUTO_BLOCK_ENABLED = True
 AUTO_BLOCK_ENABLED_ID = True
-SUSPICIOUS_PATTERNS = [
-    r"(?i)(\bselect\b|\binsert\b|\bupdate\b|\bdelete\b|\bdrop\b|\bunion\b|--|\bexec\b|\bcast\b|sleep\s*\(|benchmark\s*\(|information_schema|waitfor\s+delay|'\s*or\s*'|1\s*=\s*1)",  # SQLi
-    r"(?i)(<script.*?>|</script>|%3cscript|javascript:|onerror\s*=|onload\s*=|onmouseover\s*=|onfocus\s*=|<iframe|<svg|<img|alert\s*\(|document\.cookie|eval\s*\()",  # XSS
+
+# Level 1: Pola Ancaman KRITIS (Eksploitasi Sistem, File Rahasia, RCE, LFI, Backdoor -> Limit 3x langsung Blokir)
+CRITICAL_PATTERNS = [
     r"(?i)(\.\.[/\\]|%2e%2e[/\\%])",  # Path Traversal
     r"(?i)(cmd=|exec=|[\s;|&]{2,}|\|\s*(?:sh|bash|nc|wget|curl|php|python|perl|ls|cat|id|whoami)\b|;\s*(?:ls|cat|id|whoami|wget|curl)\b|\bsystem\s*\(|\bshell_exec\b|\bpassthru\s*\(|\bphpinfo\s*\(|\bbase64_decode\s*\()",  # Command Injection & RCE
     r"(?i)(/etc/passwd|/etc/shadow|/proc/self|\.\./.*config|boot\.ini|win\.ini|php://filter|php://input)",  # LFI
@@ -39,6 +42,14 @@ SUSPICIOUS_PATTERNS = [
     r"(?i)^/(?!index\.php\b).*\.php(?:\?|$)",  # Unauthorized PHP / Webshell Backdoor Probe (Caddy @blockphp 403)
     r"(?i)(169\.254\.169\.254|metadata\.google\.internal|\$\{jndi:|\{\{.*\*.*\}\})",  # SSRF, Log4Shell & SSTI
 ]
+
+# Level 2: Pola Ancaman MEDIUM/HIGH (Teks SQLi / XSS Kontekstual -> IP Luar Limit 3x, IP Indonesia Toleransi 10x)
+MEDIUM_HIGH_PATTERNS = [
+    r"(?i)(union\s+(?:all\s+)?select\b|\bselect\b.{1,100}?\bfrom\b|\binsert\s+into\b|\bupdate\b.{1,100}?\bset\b|\bdelete\s+from\b|\bdrop\s+(?:table|database|user)\b|\balter\s+table\b|\bexec\s*\(|\bcast\s*\(|sleep\s*\(|benchmark\s*\(|information_schema|waitfor\s+delay|'\s*(?:or|and)\s*['\d]|1\s*=\s*1|(?:['\";]|%27|%22)\s*--)",  # SQLi Kontekstual
+    r"(?i)(<script.*?>|</script>|%3cscript|javascript:|onerror\s*=|onload\s*=|onmouseover\s*=|onfocus\s*=|<iframe|<svg|<img|alert\s*\(|document\.cookie|eval\s*\()",  # XSS
+]
+
+SUSPICIOUS_PATTERNS = CRITICAL_PATTERNS + MEDIUM_HIGH_PATTERNS
 
 BAD_USER_AGENT_PATTERN = re.compile(
     r"(?i)(sqlmap|nikto|nuclei|nmap|masscan|gobuster|dirbuster|ffuf|wpscan|acunetix|burpsuite|zgrab|hydra|metasploit|curl/|wget/|python-requests|scrapy)"
@@ -81,7 +92,7 @@ if os.path.exists(CONFIG_FILE):
         pass
 
     AI_ENABLED = config.getboolean('AI', 'Enabled', fallback=True)
-    GEMINI_KEY = config.get('AI', 'GeminiKey', fallback='ISI_DENGAN_GOOGLE_GEMINI_API_KEY_ANDA')
+    GEMINI_KEY = config.get('AI', 'GeminiKey', fallback='YOUR_GEMINI_API_KEY')
     AI_MODEL = config.get('AI', 'Model', fallback='gemini-3.8-flash')
     logger.info(f"Konfigurasi AI dimuat: Enabled={AI_ENABLED}, Model={AI_MODEL}")
 else:
@@ -274,6 +285,13 @@ def local_tactical_ai_analysis(ip, domain, uri, pattern, body=""):
             f"• Taktik: Penyerang ({ip}) berupaya memaksa server `{domain}` mengakses metadata internal atau mengeksekusi kode jarak jauh pada `{endpoint}`.\n"
             f"• Saran Taktis AI: Blokir IP `{ip}` secara permanen via iptables DROP dan perketat filter keluar (egress) server."
         )
+    elif 'ddos' in pattern.lower() or 'traffic' in pattern.lower():
+        return (
+            f"• Tipe: Volumetric HTTP Flood / Indikasi DDoS (CWE-400 / MITRE T1499)\n"
+            f"• Tingkat Bahaya: 🟠 TINGGI\n"
+            f"• Taktik: IP `{ip}` mendominasi lonjakan trafik dinamis ke `{endpoint}` pada `{domain}` yang berpotensi menguras sumber daya server.\n"
+            f"• Saran Taktis AI: Verifikasi apakah `{ip}` adalah jaringan kantor/ISP pegawai; jika murni bot/flood, konfirmasi blokir via iptables DROP."
+        )
     else:
         return (
             f"• Tipe: Anomali Eksploitasi Web / Remote Probe (CWE-20)\n"
@@ -409,13 +427,6 @@ def monitor_caddy_log(log_path, domain_label, is_auto_block_fn):
             log_entry = json.loads(line.decode())
             if log_entry.get('request'):
                 now = time.time()
-                request_times.append(now)
-
-                # Clean up deque
-                while request_times and now - request_times[0] > CHECK_INTERVAL:
-                    request_times.popleft()
-
-                count = len(request_times)
                 req_obj = log_entry['request']
                 ip = extract_real_ip(req_obj)
                 raw_uri = req_obj.get('uri', '')
@@ -426,33 +437,51 @@ def monitor_caddy_log(log_path, domain_label, is_auto_block_fn):
                 ua_list = headers.get('User-Agent', [])
                 user_agent = ua_list[0] if ua_list else ''
 
-                # Detect high traffic / DDoS
-                if count >= REQUEST_THRESHOLD and now - last_alert_time > CHECK_INTERVAL:
-                    _, geo_label = is_foreign_ip(ip)
-                    THREAT_CACHE[ip] = {
+                uri_parts = uri.split('?', 1)
+                req_path = uri_parts[0]
+                req_query = uri_parts[1] if len(uri_parts) > 1 else ''
+                is_static = is_static_asset_path(req_path) or 'multiple-select' in uri.lower()
+
+                # Hanya hitung request halaman dinamis (bukan file statis .css/.js/.png/.jpg)
+                # agar pegawai yang memuat banyak gambar/script saat buka web tidak memicu alarm DDoS palsu
+                if not is_static:
+                    request_times.append((now, ip, req_path or '/'))
+
+                # Clean up deque (hapus entri yang lebih tua dari CHECK_INTERVAL)
+                while request_times and now - request_times[0][0] > CHECK_INTERVAL:
+                    request_times.popleft()
+
+                count = len(request_times)
+
+                # Detect high traffic / DDoS berdasarkan Top IP Dominan (Opsi 3)
+                if not is_static and count >= REQUEST_THRESHOLD and now - last_alert_time > CHECK_INTERVAL:
+                    ip_counts = Counter(item[1] for item in request_times)
+                    top_ip, top_ip_count = ip_counts.most_common(1)[0]
+                    uri_counts = Counter(item[2] for item in request_times if item[1] == top_ip)
+                    top_uri = uri_counts.most_common(1)[0][0] if uri_counts else (req_path or '/')
+                    pct = int((top_ip_count / count) * 100) if count else 0
+
+                    _, geo_label = is_foreign_ip(top_ip)
+                    THREAT_CACHE[top_ip] = {
                         'domain': domain_label,
-                        'uri': uri,
-                        'pattern': f'DDoS / High Traffic ({count} req/{CHECK_INTERVAL}s)',
-                        'body': body
+                        'uri': top_uri,
+                        'pattern': f'DDoS / High Traffic ({top_ip_count}/{count} req/{CHECK_INTERVAL}s)',
+                        'body': f"Top Offender IP: {top_ip} ({top_ip_count} dari {count} req dalam {CHECK_INTERVAL} detik)"
                     }
                     msg = (
                         f"🚨 *Traffic Tinggi / Indikasi DDoS Terdeteksi*\n"
                         f"🌐 Domain: `{domain_label}`\n"
                         f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                        f"📍 IP Terakhir: `{ip}` ({geo_label})\n"
-                        f"📈 Requests: {count} req/{CHECK_INTERVAL} detik"
+                        f"📍 Top IP Dominan: `{top_ip}` ({geo_label})\n"
+                        f"📊 Kontribusi IP: `{top_ip_count} dari {count} req/{CHECK_INTERVAL} detik ({pct}%)`\n"
+                        f"🔗 Target URI Dominan: `{top_uri}`"
                     )
                     logger.info(msg)
-                    send_alert_with_button(ip, msg, show_ai=True)
+                    send_alert_with_button(top_ip, msg, show_ai=True)
                     last_alert_time = now
 
-                # Detect suspicious patterns
-                uri_parts = uri.split('?', 1)
-                req_path = uri_parts[0]
-                req_query = uri_parts[1] if len(uri_parts) > 1 else ''
-
                 # Pengecualian mutlak untuk file statis / plugin (seperti multiple-select.js)
-                if is_static_asset_path(req_path) or 'multiple-select' in uri.lower():
+                if is_static:
                     # Jika asset statis membawa query string (?v=123), periksa HANYA query string-nya
                     if req_query:
                         target_to_check = req_query
@@ -462,23 +491,51 @@ def monitor_caddy_log(log_path, domain_label, is_auto_block_fn):
                     target_to_check = uri
 
                 matched_pattern = None
+                is_critical_hit = False
                 if target_to_check or body:
-                    for pattern in SUSPICIOUS_PATTERNS:
-                        if (target_to_check and re.search(pattern, target_to_check, re.IGNORECASE)) or (body and re.search(pattern, body, re.IGNORECASE)):
+                    from urllib.parse import unquote_plus
+                    decoded_target = unquote_plus(target_to_check) if target_to_check else ''
+                    decoded_body = unquote_plus(body) if body else ''
+                    # Cek Level 1 (CRITICAL_PATTERNS) terlebih dahulu
+                    for pattern in CRITICAL_PATTERNS:
+                        if (decoded_target and re.search(pattern, decoded_target, re.IGNORECASE)) or (decoded_body and re.search(pattern, decoded_body, re.IGNORECASE)):
                             matched_pattern = pattern
+                            is_critical_hit = True
                             break
+                    # Jika belum kena Level 1, cek Level 2 (MEDIUM_HIGH_PATTERNS: SQLi/XSS Kontekstual)
+                    if not matched_pattern:
+                        for pattern in MEDIUM_HIGH_PATTERNS:
+                            if (decoded_target and re.search(pattern, decoded_target, re.IGNORECASE)) or (decoded_body and re.search(pattern, decoded_body, re.IGNORECASE)):
+                                matched_pattern = pattern
+                                is_critical_hit = False
+                                break
 
-                # Deteksi Scanner / Bot Berbahaya dari User-Agent (sqlmap, nikto, nuclei, curl, wget, dll)
+                # Deteksi Scanner / Bot Berbahaya dari User-Agent (sqlmap, nikto, nuclei, curl, wget, dll) -> Level 1 KRITIS
                 if not matched_pattern and user_agent:
                     m_ua = BAD_USER_AGENT_PATTERN.search(user_agent)
                     if m_ua:
                         matched_pattern = f"Scanner User-Agent ({m_ua.group(1)})"
+                        is_critical_hit = True
 
                 if matched_pattern:
-                    _, geo_label = is_foreign_ip(ip)
+                    is_foreign, geo_label = is_foreign_ip(ip)
                     # Tambah hitungan pelanggaran (Strike Counter) untuk IP ini
                     STRIKE_COUNTER[ip] = STRIKE_COUNTER.get(ip, 0) + 1
                     strikes = STRIKE_COUNTER[ip]
+
+                    # Adaptive Risk-Based Threshold:
+                    # - Pola KRITIS (Level 1) -> Limit 3x (Semua IP)
+                    # - IP Luar Negeri (Non-ID) -> Limit 3x (Semua Level)
+                    # - IP Indonesia + Pola Medium/High (SQLi/XSS Teks) -> Toleransi 10x
+                    if is_critical_hit:
+                        effective_limit = STRIKE_LIMIT_CRITICAL
+                        severity_badge = "🔴 KRITIS (Limit 3x)"
+                    elif is_foreign:
+                        effective_limit = STRIKE_LIMIT_FOREIGN
+                        severity_badge = "🌍 IP LUAR NEGERI (Limit 3x)"
+                    else:
+                        effective_limit = STRIKE_LIMIT_ID_MEDIUM
+                        severity_badge = "🟠 MEDIUM/HIGH - IP Indonesia (Toleransi 10x)"
 
                     # Simpan konteks ancaman untuk On-Demand AI Copilot
                     THREAT_CACHE[ip] = {
@@ -488,23 +545,24 @@ def monitor_caddy_log(log_path, domain_label, is_auto_block_fn):
                         'body': body or (f"User-Agent: {user_agent[:120]}" if user_agent else "")
                     }
 
-                    # Jika Auto-Block aktif DAN jumlah serangan sudah mencapai minimal 3x (AUTO_BLOCK_STRIKE_LIMIT)
+                    # Jika Auto-Block aktif DAN jumlah serangan sudah mencapai effective_limit (3x atau 10x)
                     auto_blocked_now = False
-                    if is_auto_block_fn() and strikes >= AUTO_BLOCK_STRIKE_LIMIT:
+                    if is_auto_block_fn() and strikes >= effective_limit:
                         if ip not in SUSPICIOUS_IPS:
                             add_to_blacklist(ip)
                             block_ip(ip)
                         auto_blocked_now = True
-                        status_line = f"🚨 *Status Auto-Block:* `AKTIF — Strike {strikes}/{AUTO_BLOCK_STRIKE_LIMIT} (IP LANGSUNG DIBLOKIR IPTABLES!)`"
+                        status_line = f"🚨 *Status Auto-Block:* `AKTIF — Strike {strikes}/{effective_limit} (IP LANGSUNG DIBLOKIR IPTABLES!)`"
                     else:
                         mode_str = "ON" if is_auto_block_fn() else "OFF"
-                        status_line = f"⚡ *Hitungan Serangan:* `Strike {strikes}/{AUTO_BLOCK_STRIKE_LIMIT}` (Auto-Block: {mode_str})"
+                        status_line = f"⚡ *Hitungan Serangan:* `Strike {strikes}/{effective_limit}` (Auto-Block: {mode_str})"
 
                     alert = (
                         f"⚠️ *Pola Mencurigakan Terdeteksi*\n"
                         f"🌐 Domain: `{domain_label}`\n"
                         f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
                         f"📍 IP: `{ip}` ({geo_label})\n"
+                        f"🛡️ Level Risiko: `{severity_badge}`\n"
                         f"🔗 URI: `{uri}`\n"
                         f"📝 Body/Info: `{(body or user_agent or '-')[:250]}`\n"
                         f"🔍 Pattern: `{matched_pattern}`\n"
@@ -539,25 +597,66 @@ async def handle_block_button(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.answer("ℹ️ IP ini sudah diblokir sebelumnya.", show_alert=False)
         return
 
-    if not query.data or not query.data.startswith("blockip:"):
+    if not query.data:
         await query.answer()
         return
 
+    old_text = query.message.text or ""
+    has_ai_done = "ANALISIS INTELIJEN AI" in old_text
+
+    # LANGKAH 1: Konfirmasi 2-Langkah saat tombol "🔒 Blokir IP Ini" diklik (Mencegah Salah Pencet!)
+    if query.data.startswith("blockip:"):
+        ip = query.data.split(":", 1)[1].strip()
+        await query.answer(f"⚠️ Konfirmasi diperlukan sebelum memblokir IP {ip}", show_alert=False)
+        rows = [[
+            InlineKeyboardButton(f"⚠️ Yakin Blokir {ip}?", callback_data=f"confirmblock:{ip}"),
+            InlineKeyboardButton("❌ Batal", callback_data=f"cancelblock:{ip}")
+        ]]
+        if AI_ENABLED:
+            if has_ai_done:
+                rows.append([InlineKeyboardButton("✅ Analisis Selesai", callback_data="ai_done")])
+            else:
+                rows.append([InlineKeyboardButton("🧠 Minta Analisis AI", callback_data=f"askai:{ip}")])
+        try:
+            await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(rows))
+        except Exception:
+            pass
+        return
+
+    # BATAL BLOKIR: Kembalikan ke tampilan tombol semula jika admin menekan "❌ Batal"
+    if query.data.startswith("cancelblock:"):
+        ip = query.data.split(":", 1)[1].strip()
+        await query.answer(f"✅ Dibatalkan! IP {ip} tidak jadi diblokir.", show_alert=False)
+        buttons = [InlineKeyboardButton("🔒 Blokir IP Ini", callback_data=f"blockip:{ip}")]
+        if AI_ENABLED:
+            if has_ai_done:
+                buttons.append(InlineKeyboardButton("✅ Analisis Selesai", callback_data="ai_done"))
+            else:
+                buttons.append(InlineKeyboardButton("🧠 Minta Analisis AI", callback_data=f"askai:{ip}"))
+        try:
+            await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([buttons]))
+        except Exception:
+            pass
+        return
+
+    if not query.data.startswith("confirmblock:"):
+        await query.answer()
+        return
+
+    # LANGKAH 2: Eksekusi iptables DROP setelah admin mengonfirmasi "⚠️ Yakin Blokir"
     ip = query.data.split(":", 1)[1].strip()
 
     try:
         # Beri respon instan agar tombol tidak berputar/loading di layar Telegram
-        await query.answer(f"⏳ Memproses blokir IP {ip}...", show_alert=False)
+        await query.answer(f"⏳ Memproses blokir IP {ip} di iptables...", show_alert=False)
 
         success, msg = execute_iptables_cmd('-I', ip)
-
-        old_text = query.message.text or ""
 
         if success:
             add_to_blacklist(ip)
             updated_text = old_text + f"\n\n🔒 *Status:* IP `{ip}` BERHASIL DIBLOKIR oleh admin."
             buttons = [InlineKeyboardButton("✅ IP Telah Diblokir", callback_data="blocked_done")]
-            if "ANALISIS INTELIJEN AI" not in old_text and AI_ENABLED:
+            if not has_ai_done and AI_ENABLED:
                 buttons.append(InlineKeyboardButton("🧠 Minta Analisis AI", callback_data=f"askai:{ip}"))
             new_keyboard = InlineKeyboardMarkup([buttons])
             try:
@@ -705,7 +804,12 @@ async def autoblock_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌")
         return
     AUTO_BLOCK_ENABLED = True
-    await update.message.reply_text(f"✅ Smart Auto-Block DIHIDUPKAN (Otomatis blokir semua IP yang melakukan minimal {AUTO_BLOCK_STRIKE_LIMIT}x serangan).")
+    await update.message.reply_text(
+        f"✅ Adaptive Smart Auto-Block DIHIDUPKAN:\n"
+        f"• Pola KRITIS / Scanner: {STRIKE_LIMIT_CRITICAL}x Strike langsung blokir\n"
+        f"• IP Luar Negeri: {STRIKE_LIMIT_FOREIGN}x Strike langsung blokir\n"
+        f"• IP Indonesia (SQLi/XSS Teks): Toleransi {STRIKE_LIMIT_ID_MEDIUM}x Strike"
+    )
 
 async def autoblock_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global AUTO_BLOCK_ENABLED
@@ -720,7 +824,10 @@ async def autoblock_on_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌")
         return
     AUTO_BLOCK_ENABLED_ID = True
-    await update.message.reply_text(f"✅ Smart Auto-Block sangiran.id DIHIDUPKAN (Minimal {AUTO_BLOCK_STRIKE_LIMIT}x serangan).")
+    await update.message.reply_text(
+        f"✅ Adaptive Smart Auto-Block sangiran.id DIHIDUPKAN "
+        f"(Kritis/Luar Negeri: {STRIKE_LIMIT_CRITICAL}x | IP Indonesia Medium: {STRIKE_LIMIT_ID_MEDIUM}x)."
+    )
 
 async def autoblock_off_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global AUTO_BLOCK_ENABLED_ID
@@ -738,7 +845,7 @@ def start_telegram_bot():
         app.add_handler(CommandHandler("block_off", autoblock_off))
         app.add_handler(CommandHandler("block_id_off", autoblock_off_id))
         app.add_handler(CommandHandler("block_id_on", autoblock_on_id))
-        app.add_handler(CallbackQueryHandler(handle_block_button, pattern=r"^(blockip:|blocked_done)"))
+        app.add_handler(CallbackQueryHandler(handle_block_button, pattern=r"^(blockip:|confirmblock:|cancelblock:|blocked_done)"))
         app.add_handler(CallbackQueryHandler(handle_ai_button, pattern=r"^(askai:|ai_loading|ai_done)"))
         logger.info("Telegram bot started")
         app.run_polling()
