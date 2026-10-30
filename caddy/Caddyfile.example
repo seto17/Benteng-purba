@@ -1,0 +1,97 @@
+{
+    email admin@instansi-demo.id
+
+    servers {
+        trusted_proxies static 127.0.0.1 192.168.0.0/16 10.0.0.0/8 172.16.0.0/12
+    }
+}
+
+http://presensi.instansi-demo.id {
+    # --- BLOCKER & SECURITY (SATUAN PENGAMAN BENTENG PURBA) ---
+
+    # Blokir file sensitif di level root
+    @blockEnv path_regexp /\.(env|cmd|py|sh|exe|bat|sql|bak)$
+    respond @blockEnv 403
+
+    # Blokir folder sistem Laravel/Web
+    @forbidden {
+        path /.git* /storage* /bootstrap/cache* /node_modules*
+    }
+    respond @forbidden 403
+
+    # Blokir semua file PHP kecuali index.php
+    @blockphp {
+        not path /index.php*
+        path *.php
+    }
+    respond @blockphp 403
+
+    # Blokir Bot/Script otomatis (User-Agent)
+    @bad_user_agent {
+        header_regexp User-Agent (?i)(curl|wget|python|sqlmap|nikto|nuclei|nmap)
+    }
+    respond @bad_user_agent 403
+
+    # Blokir permintaan tanpa User-Agent
+    @blockEmptyUserAgent {
+        not header User-Agent *
+    }
+    respond @blockEmptyUserAgent 403
+
+    # --- MAIN APP (APLIKASI UTAMA -> WAF-GO :8080) ---
+    @allowPaths path /build* /pegawaic* /assets* /pendukung* /api* /login* /logout* /izin* /
+    handle @allowPaths {
+        header {
+            X-RateLimit-Limit "200"
+            X-RateLimit-Remaining "109"
+            X-RateLimit-Reset "200"
+            X-Content-Type-Options "nosniff"
+            X-Frame-Options "DENY"
+            X-XSS-Protection "1;mode=block"
+            Referrer-Policy "strict-origin-when-cross-origin"
+            -X-Powered-By
+            -Server
+        }
+
+        # 1. Blokir Bot/Scanner CLI di dalam handle @allowPaths (Zero False Positive bagi Browser/Mobile App)
+        @bad_ua_in {
+            header_regexp User-Agent (?i)(curl|wget|python-requests|sqlmap|nikto|nuclei|nmap|masscan|gobuster|dirbuster|ffuf|wpscan|zgrab|hydra|metasploit|scrapy)
+        }
+        respond @bad_ua_in 403
+
+        @empty_ua_in {
+            not header User-Agent *
+        }
+        respond @empty_ua_in 403
+
+        # 2. Blokir File Sensitif & Eksekusi PHP Ilegal di dalam handle @allowPaths
+        @blockSensitive_in path_regexp (\.env$|\.py$|\.sql$|\.bak$|\.git)
+        respond @blockSensitive_in 403
+
+        @blockphpp_in {
+            not path /index.php*
+            path *.php *.sh *.exe *.bat *.cmd
+        }
+        respond @blockphpp_in 403
+
+        # 3. Blokir Eksploitasi Sistem OS Kritis pada URL/Query (LFI, RFI, RCE, Path Traversal, SSRF, Log4Shell, SSTI) -> 0% False Positive!
+        @blockCriticalURI_in {
+            vars_regexp {http.request.uri} (?i)(\.\.[/\\]|%2e%2e|/etc/passwd|/etc/shadow|/proc/self|boot\.ini|win\.ini|php://filter|php://input|convert\.base64|;\s*(?:whoami|ls|cat|id|wget|curl|sh|bash)|\|\s*(?:sh|bash|nc|wget|curl|whoami|ls|cat|id)|cmd=|exec=|phpinfo\(|https?://[^\s&]+\.(?:php|sh|txt|pl|py|asp|jsp|exe|bat|cmd)|169\.254\.169\.254|metadata\.google\.internal|jndi:|7\*7)
+        }
+        respond @blockCriticalURI_in 403
+
+        reverse_proxy 127.0.0.1:8080
+    }
+
+    respond 403
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.bunny.net https://fonts.googleapis.com; font-src 'self' data: https://fonts.bunny.net https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none';"
+    }
+
+    log {
+        output file /var/log/caddy/access.log
+        format json
+    }
+}
