@@ -427,24 +427,15 @@ func formatRuleHit(label, matched string) string {
 	return label
 }
 
+func isInternalPresensiEndpoint(pathLower string) bool {
+	if strings.Contains(pathLower, "..") {
+		return false
+	}
+	return secretEndpointPrefixRegex.MatchString(pathLower)
+}
+
 func isMalicious(r *http.Request) (bool, string, string) {
-	// 0. Cek User-Agent berbahaya (sqlmap, nikto, nuclei, nmap, curl/, wget/, python-requests, dll)
-	ua := r.Header.Get("User-Agent")
-	if ua != "" {
-		if m := wafBadUserAgentRegex.FindString(ua); m != "" {
-			return true, "Scanner User-Agent (" + m + ")", "User-Agent: " + ua
-		}
-	}
-
-	// Baca & kembalikan r.Body agar backend Laravel tetap menerima payload utuh (termasuk upload file besar)
-	var bodyBytes []byte
-	if r.Body != nil {
-		bodyBytes, _ = io.ReadAll(r.Body)
-		r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-	}
-	rawBody := string(bodyBytes)
-
-	// Dekode URL Path & RequestURI mentah (mencegah bypass path traversal sebelum normalisasi)
+	// Dekode URL Path & RequestURI mentah lebih awal (mencegah bypass path traversal & mengenali endpoint internal mesin presensi)
 	rawReqURI := r.URL.RequestURI()
 	rawPathPart := r.URL.Path
 	if idx := strings.IndexByte(rawReqURI, '?'); idx != -1 {
@@ -456,6 +447,26 @@ func isMalicious(r *http.Request) (bool, string, string) {
 	}
 	decodedPath := safeDecodeURL(rawPathPart, false)
 	pathLower := strings.ToLower(decodedPath)
+	isPresensiSync := isInternalPresensiEndpoint(pathLower)
+
+	// 0. Cek User-Agent berbahaya (sqlmap, nikto, nuclei, nmap, curl/, wget/, python-requests, dll)
+	//    Kecualikan client sinkronisasi mesin absensi (python-requests / python-urllib) HANYA pada endpoint internal presensi
+	ua := r.Header.Get("User-Agent")
+	if ua != "" {
+		if m := wafBadUserAgentRegex.FindString(ua); m != "" {
+			if !(isPresensiSync && (strings.EqualFold(m, "python-requests") || strings.EqualFold(m, "python-urllib"))) {
+				return true, "Scanner User-Agent (" + m + ")", "User-Agent: " + ua
+			}
+		}
+	}
+
+	// Baca & kembalikan r.Body agar backend Laravel tetap menerima payload utuh (termasuk upload file besar)
+	var bodyBytes []byte
+	if r.Body != nil {
+		bodyBytes, _ = io.ReadAll(r.Body)
+		r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+	}
+	rawBody := string(bodyBytes)
 
 	// 1. Cek Direktori & File Sensitif HANYA pada URL Path (0% False Positive terhadap kata 'storage' di laporan pegawai)
 	if m := wafRootSensitiveDirRegex.FindString(pathLower); m != "" {
@@ -577,6 +588,7 @@ func isMalicious(r *http.Request) (bool, string, string) {
 
 var sensitiveMaskRegex = regexp.MustCompile(`(?i)(password_confirmation|current_password|password|pass|pwd|passwd|secret|gemini_key|api_key)=([^&]*)`)
 var secretEndpointMaskRegex = regexp.MustCompile(`(?i)^/(api-internal-v1|api-internal-v2|api-internal-v3|api-internal-v4|api-sync-mesin|api-mobile-presensi)\b`)
+var secretEndpointPrefixRegex = regexp.MustCompile(`(?i)^/(api-internal-v1|api-internal-v2|api-internal-v3|api-internal-v4|api-sync-mesin|api-mobile-presensi)(?:/|$)`)
 
 func maskSensitiveData(raw string) string {
 	masked := sensitiveMaskRegex.ReplaceAllString(raw, "$1=******")

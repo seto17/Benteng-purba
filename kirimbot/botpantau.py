@@ -98,10 +98,16 @@ SECRET_URI_MASK_REGEX = re.compile(
     r'(?i)^/(api-internal-v1|api-internal-v2|api-internal-v3|api-internal-v4|api-sync-mesin|api-mobile-presensi)\b'
 )
 
+ALLOWED_PRESENSI_SYNC_UA = ('python-requests', 'python-urllib')
+
 def is_internal_presensi_api(path_str):
-    """Cek apakah path adalah endpoint API presensi rutin pegawai (pagi/sore) agar tidak memicu false alarm DDoS."""
-    clean_path = path_str.split('?')[0].lower()
-    return any(clean_path.startswith(prefix) for prefix in SECRET_PRESENSI_PREFIXES)
+    """Cek apakah path adalah endpoint API internal presensi mobile & sinkronisasi mesin absensi desktop."""
+    if not path_str:
+        return False
+    clean_path = unquote(path_str.split('?')[0]).lower()
+    if '..' in clean_path or '%2e' in path_str.lower():
+        return False
+    return any(clean_path == prefix or clean_path.startswith(prefix + '/') for prefix in SECRET_PRESENSI_PREFIXES)
 
 def mask_secret_uri(uri_str):
     """Sembunyikan/masking nama endpoint rahasia (/api-mobile-presensi, dll) pada notifikasi Telegram."""
@@ -742,11 +748,14 @@ def monitor_caddy_log(log_path, domain_label, is_auto_block_fn):
                                 break
 
                 # 4. Deteksi Scanner / Bot Berbahaya dari User-Agent (sqlmap, nikto, nuclei, curl, wget, dll) -> Level 1 KRITIS
+                #    Kecualikan khusus client sinkronisasi mesin presensi (python-requests/python-urllib) HANYA pada endpoint rahasia presensi
                 if not matched_pattern and user_agent:
                     m_ua = BAD_USER_AGENT_PATTERN.search(user_agent)
                     if m_ua:
-                        matched_pattern = f"Scanner User-Agent ({m_ua.group(1)})"
-                        is_critical_hit = True
+                        ua_hit = m_ua.group(1)
+                        if not (is_presensi_routine and ua_hit.lower() in ALLOWED_PRESENSI_SYNC_UA):
+                            matched_pattern = f"Scanner User-Agent ({ua_hit})"
+                            is_critical_hit = True
 
                 if matched_pattern:
                     # Filter anti-dobel (Deduplikasi 2.5 detik untuk IP + URI yang sama persis):
