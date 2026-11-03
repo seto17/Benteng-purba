@@ -73,7 +73,7 @@ var wafCriticalRules = []wafRule{
 	},
 	{
 		Label: "OS Command Injection / RCE (CWE-78)",
-		Regex: regexp.MustCompile(`(?i)(?:(?:^|[?&;])(?:cmd|exec|command|shell)=[^&\s]+|(?:;|\|{1,2}|&&|\$\(|\x60)\s*(?:/bin/|/usr/bin/)?(?:whoami|id|uname|cat|head|tail|more|less|ls|dir|pwd|cp|mv|rm|chmod|chown|wget|curl|fetch|nc|ncat|netcat|bash|sh|zsh|ksh|dash|python\d?|perl|php|ruby|awk|sed|find|grep|nslookup|dig|powershell|cmd\.exe|net\s+user|ipconfig|ifconfig)\b|\b(?:system|shell_exec|passthru|proc_open|popen|pcntl_exec|phpinfo|base64_decode|create_function)\s*\()`),
+		Regex: regexp.MustCompile(`(?i)(?:(?:^|[?&;])(?:cmd|exec|command|shell)=[^&\s]+|(?:\|{1,2}|&&|\$\(|\x60)\s*(?:/bin/|/usr/bin/)?(?:whoami|id|uname|cat|head|tail|more|less|ls|dir|pwd|cp|mv|rm|chmod|chown|wget|curl|fetch|nc|ncat|netcat|bash|sh|zsh|ksh|dash|python\d?|perl|php|ruby|awk|sed|find|grep|nslookup|dig|powershell|cmd\.exe|net\s+user|ipconfig|ifconfig)\b|;\s*(?:/bin/|/usr/bin/|whoami\b|uname\b|chmod\b|chown\b|wget\b|curl\b|ncat\b|netcat\b|nslookup\b|powershell\b|cmd\.exe\b|net\s+user\b|ipconfig\b|ifconfig\b)|;\s*(?:(?:cat|head|tail|more|less|ls|dir|cp|mv|rm|nc|bash|sh|zsh|ksh|dash|python\d?|perl|php|ruby|find|grep)\s+(?:-[a-z0-9]+|/[a-z0-9_.\-]+|\./|~/)|id\s*(?:;|\||&|$))|\b(?:shell_exec|passthru|proc_open|popen|pcntl_exec|phpinfo|base64_decode|create_function)\s*\(|\bsystem\s*\(\s*(?:['"\x60$]|(?:chr|base64_decode|getenv|hex2bin|pack|urldecode|stripslashes)\s*\(|(?:/bin/|/usr/bin/|cmd\.exe|powershell|whoami\b|id\b|uname\b|cat\s|ls\b|wget\s|curl\s|nc\s|bash\b|sh\b)))`),
 	},
 	{
 		Label: "SSRF / Log4Shell / SSTI / XXE",
@@ -85,7 +85,7 @@ var wafCriticalRules = []wafRule{
 	},
 	{
 		Label: "Cross-Site Scripting / XSS Event & Sink (CWE-79)",
-		Regex: regexp.MustCompile(`(?i)(?:<[^>]*\bon(?:error|load|unload|click|dblclick|mouseover|mouseout|mouseenter|mouseleave|focus|blur|change|submit|input|invalid|keydown|keypress|keyup|toggle|animationstart|transitionend|pointerover|auxclick|touchstart)\s*=|\b(?:onerror|onload|onmouseover|onfocus|onclick|ontoggle|oninput)\s*=\s*[a-z0-9_'"\x60(]|\b(?:alert|confirm|prompt|eval)\s*\(\s*(?:[0-9'"\x60\)\-\+!~\[]|document\b|window\b|this\b|self\b|top\b|location\b|string\b|/)|<\s*[^>]*>\s*(?:alert|confirm|prompt|eval)\s*\(|\balert\(|document\s*\.\s*(?:cookie|domain|write|writeln)|(?:\bsettimeout|\bsetinterval)\s*\(\s*['"\x60])`),
+		Regex: regexp.MustCompile(`(?i)(?:<[^>]*\bon(?:error|load|unload|click|dblclick|mouseover|mouseout|mouseenter|mouseleave|focus|blur|change|submit|input|invalid|keydown|keypress|keyup|toggle|animationstart|transitionend|pointerover|auxclick|touchstart)\s*=|\b(?:onerror|onload|onmouseover|onfocus|onclick|ontoggle|oninput)\s*=\s*[a-z0-9_'"\x60(]|\b(?:alert|confirm|prompt|eval)\s*\(\s*(?:[0-9'"\x60\)\-\+!~\[]|document\b|window\b|this\b|self\b|top\b|location\b|string\b|/)|\balert\(|document\s*\.\s*(?:cookie|domain|write|writeln)|(?:\bsettimeout|\bsetinterval)\s*\(\s*['"\x60])`),
 	},
 }
 
@@ -98,7 +98,7 @@ var wafSQLRules = []wafRule{
 	},
 	{
 		Label: "SQL Injection SELECT-FROM (CWE-89)",
-		Regex: regexp.MustCompile(`(?i)(?:\bselect\s+(?:\*|(?:distinct\s+)?[a-z0-9_\x60"\[\].]+\s*\([^)]*\)|@@[a-z0-9_]+|[a-z0-9_\x60"\[\].]+\s*,\s*[a-z0-9_\x60"\[\].,\s*]+)\s+from\s+[a-z0-9_\x60"\[\].]+|(?:['"();]|--|\b(?:and|or|where|having|exists|in)\b)\s*select\s+[a-z0-9_*.,\s\x60"\[\]()@+-]{1,80}\s+from\s+[a-z0-9_\x60"\[\].]+)`),
+		Regex: regexp.MustCompile(`(?i)(?:\bselect\s+(?:\*|(?:distinct\s+)?[a-z0-9_\x60"\[\].]+\([^)]*\)|@@[a-z0-9_]+|[a-z0-9_\x60"\[\].]+\s*,\s*[a-z0-9_\x60"\[\].,\s*]+)\s+from\s+[a-z0-9_\x60"\[\].]+|(?:['"();]|--|\b(?:and|or|where|having|exists|in)\b)\s*select\s+[a-z0-9_*.,\s\x60"\[\]()@+-]{1,80}\s+from\s+[a-z0-9_\x60"\[\].]+)`),
 	},
 	{
 		Label: "SQL Injection Stacked/DDL/DML (CWE-89)",
@@ -110,7 +110,7 @@ var wafSQLRules = []wafRule{
 	},
 	{
 		Label: "SQL Injection Time/Error/System (CWE-89)",
-		Regex: regexp.MustCompile(`(?i)(?:\b(?:pg_)?sleep\s*\(\s*\d+|\bbenchmark\s*\(\s*\d+\s*,|\bwaitfor\s+delay\s+['"]|\b(?:extractvalue|updatexml)\s*\(|\binformation_schema\b|\bload_file\s*\(|\binto\s+(?:outfile|dumpfile)\b|\bcast\s*\((?:[^()]|\([^()]*\)){1,160}\bas\s+(?:char|varchar|nchar|nvarchar|int|integer|signed|unsigned|binary|decimal|date|datetime|text|xml|json)\b|\bexec(?:ute)?\s+(?:xp_|sp_)|\bexec\s*\(\s*['"@])`),
+		Regex: regexp.MustCompile(`(?i)(?:\b(?:pg_)?sleep\s*\(\s*\d+(?:\.\d+)?\s*\)|\bbenchmark\s*\(\s*\d+\s*,|\bwaitfor\s+delay\s+['"]|\b(?:extractvalue|updatexml)\s*\(|\binformation_schema\b|\bload_file\s*\(|\binto\s+(?:outfile|dumpfile)\b|\bcast\s*\((?:[^()]|\([^()]*\)){1,160}\bas\s+(?:char|varchar|nchar|nvarchar|int|integer|signed|unsigned|binary|decimal|date|datetime|text|xml|json)\b|\bexec(?:ute)?\s+(?:xp_|sp_)|\bexec\s*\(\s*['"@])`),
 	},
 }
 
